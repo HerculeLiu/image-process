@@ -222,7 +222,7 @@ const HTML = `<!doctype html>
   <main class="app">
     <section class="hero">
       <h1>Image Process Studio</h1>
-      <p class="subtitle">上传图片后可进行 OCR、图片翻译、格式转换、去背景。OCR 由后端调用百度文档 OCR，翻译图由前端根据坐标重绘并导出。</p>
+      <p class="subtitle">上传图片后可进行 OCR、图片翻译、格式转换、去背景。OCR 由后端调用百度文档 OCR，翻译文本由后端调用 GLM-4.5-Flash，再由前端根据坐标重绘并导出。</p>
     </section>
 
     <section class="grid">
@@ -349,20 +349,12 @@ const HTML = `<!doctype html>
       return data;
     }
 
-    async function translateText(text, target) {
-      if (!text.trim()) return text;
-      if (window.Translator && typeof window.Translator.create === "function") {
-        try {
-          const translator = await window.Translator.create({
-            sourceLanguage: "auto",
-            targetLanguage: target,
-          });
-          return await translator.translate(text);
-        } catch (err) {
-          console.warn("Browser translator unavailable", err);
-        }
-      }
-      return "[" + target + "] " + text;
+    async function translateTextsWithGlm(texts, target) {
+      const data = await postJson("/api/translate-texts", {
+        texts,
+        targetLang: target,
+      });
+      return Array.isArray(data.translations) ? data.translations : [];
     }
 
     function blurAndDrawLine(line, text) {
@@ -478,19 +470,16 @@ const HTML = `<!doctype html>
           });
           const lines = data.lines || [];
           const target = targetLang.value;
-          const translated = [];
-          for (const line of lines) {
-            translated.push(await translateText(line.text, target));
+          const sourceTexts = lines.map((line) => line.text);
+          const translated = await translateTextsWithGlm(sourceTexts, target);
+          if (translated.length !== lines.length) {
+            throw new Error("翻译结果数量与 OCR 行数不一致");
           }
           for (let i = 0; i < lines.length; i++) {
             blurAndDrawLine(lines[i], translated[i]);
           }
           setResult(lines.map((line, i) => line.text + " -> " + translated[i]).join("\\n") || "未识别到文本");
-          if (!(window.Translator && typeof window.Translator.create === "function")) {
-            setStatus("翻译完成（当前浏览器未开放 Translator API，已使用前缀占位翻译）。", true);
-          } else {
-            setStatus("图片翻译完成，共处理 " + lines.length + " 行。");
-          }
+          setStatus("图片翻译完成（GLM-4.5-Flash），共处理 " + lines.length + " 行。");
           return;
         }
 
@@ -625,6 +614,76 @@ function normalizeLines(ocrPayload) {
   return lines;
 }
 
+function parseJsonArrayFromModel(content) {
+  if (typeof content !== "string") {
+    throw new Error("翻译模型返回内容为空");
+  }
+  const trimmed = content.trim();
+  const cleaned = trimmed
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/, "");
+  const parsed = JSON.parse(cleaned);
+  if (!Array.isArray(parsed)) {
+    throw new Error("翻译模型返回格式错误，期望 JSON 数组");
+  }
+  return parsed.map((item) => String(item));
+}
+
+async function callGlmTranslate(texts, targetLang, env) {
+  const apiKey = env.ZHIPU_API_KEY;
+  if (!apiKey) {
+    throw new Error("缺少 ZHIPU_API_KEY");
+  }
+  if (!Array.isArray(texts) || texts.length === 0) {
+    throw new Error("texts 不能为空");
+  }
+
+  const systemPrompt =
+    "You are a translation engine. Translate each input item into the target language. " +
+    "Keep the order and return ONLY a valid JSON array of translated strings. " +
+    "Do not add explanation.";
+  const userPrompt =
+    "target_lang: " + targetLang + "\n" +
+    "texts: " + JSON.stringify(texts);
+
+  const res = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer " + apiKey,
+    },
+    body: JSON.stringify({
+      model: "glm-4.5-flash",
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    }),
+  });
+
+  const payload = await res.json();
+  if (!res.ok) {
+    const errMsg = payload.error && payload.error.message ? payload.error.message : "GLM 翻译请求失败";
+    throw new Error(errMsg);
+  }
+  const content =
+    payload &&
+    payload.choices &&
+    payload.choices[0] &&
+    payload.choices[0].message &&
+    payload.choices[0].message.content
+      ? payload.choices[0].message.content
+      : "";
+
+  const translations = parseJsonArrayFromModel(content);
+  if (translations.length !== texts.length) {
+    throw new Error("GLM 翻译返回条目数量不匹配");
+  }
+  return translations;
+}
+
 async function handleOcr(request, env) {
   const body = await request.json();
   const base64Image = extractBase64(body.imageBase64);
@@ -639,6 +698,14 @@ async function handleOcr(request, env) {
     resultsNum: ocrPayload.results_num || lines.length,
     logId: ocrPayload.log_id || null,
   });
+}
+
+async function handleTranslateTexts(request, env) {
+  const body = await request.json();
+  const targetLang = typeof body.targetLang === "string" && body.targetLang.trim() ? body.targetLang.trim() : "en";
+  const texts = Array.isArray(body.texts) ? body.texts.map((item) => String(item || "")) : [];
+  const translations = await callGlmTranslate(texts, targetLang, env);
+  return json({ ok: true, translations, model: "glm-4.5-flash" });
 }
 
 export default {
@@ -664,6 +731,14 @@ export default {
         return await handleOcr(request, env);
       } catch (error) {
         return json({ ok: false, error: error.message || "图片翻译预处理失败" }, 400);
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/translate-texts") {
+      try {
+        return await handleTranslateTexts(request, env);
+      } catch (error) {
+        return json({ ok: false, error: error.message || "文本翻译失败" }, 400);
       }
     }
 

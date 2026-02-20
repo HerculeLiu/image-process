@@ -24,7 +24,8 @@ Set Baidu OCR credentials in Worker secrets:
 
 ```bash
 npx wrangler secret put BAIDU_OCR_API_KEY
-npx wrangler secret put BAIDU_SOCR_ECRET_KEY
+npx wrangler secret put BAIDU_OCR_SECRET_KEY
+npx wrangler secret put ZHIPU_API_KEY
 ```
 
 ## Deploy
@@ -35,5 +36,6 @@ Cloudflare will auto-deploy on new commits.
 ## Notes
 
 - `/api/ocr` returns recognized text + bounding boxes.
-- `/api/image-translate` currently returns OCR lines; translated image composition is done in browser canvas.
-- The browser translation step uses `window.Translator` when available; otherwise it uses a simple fallback marker.
+- `/api/image-translate` returns OCR lines for image-translation preprocessing.
+- `/api/translate-texts` uses `glm-4.5-flash` to translate OCR lines on the backend.
+- Final translated image composition (blur + redraw text) is done in browser canvas.
