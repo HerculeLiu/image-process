@@ -23,8 +23,8 @@ npx wrangler dev
 Set Baidu OCR credentials in Worker secrets:
 
 ```bash
-npx wrangler secret put BAIDU_API_KEY
-npx wrangler secret put BAIDU_SECRET_KEY
+npx wrangler secret put BAIDU_OCR_API_KEY
+npx wrangler secret put BAIDU_SOCR_ECRET_KEY
 ```
 
 ## Deploy

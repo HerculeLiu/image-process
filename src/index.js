@@ -556,10 +556,10 @@ function extractBase64(input) {
 }
 
 async function getBaiduAccessToken(env) {
-  const apiKey = env.BAIDU_API_KEY;
-  const secretKey = env.BAIDU_SECRET_KEY;
+  const apiKey = env.BAIDU_OCR_API_KEY;
+  const secretKey = env.BAIDU_OCR_SECRET_KEY;
   if (!apiKey || !secretKey) {
-    throw new Error("缺少 BAIDU_API_KEY 或 BAIDU_SECRET_KEY");
+    throw new Error("缺少 BAIDU_OCR_API_KEY 或 BAIDU_OCR_SECRET_KEY");
   }
 
   const tokenUrl =
