@@ -313,11 +313,18 @@ const HTML = `<!doctype html>
       });
     }
 
+    function getImageSize(img) {
+      const width = img && (img.naturalWidth || img.width) ? (img.naturalWidth || img.width) : 0;
+      const height = img && (img.naturalHeight || img.height) ? (img.naturalHeight || img.height) : 0;
+      return { width, height };
+    }
+
     function drawImage(img) {
+      const size = getImageSize(img);
       canvas.hidden = false;
       placeholder.hidden = true;
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
+      canvas.width = size.width;
+      canvas.height = size.height;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0);
     }
@@ -329,6 +336,15 @@ const HTML = `<!doctype html>
         reader.onerror = reject;
         reader.readAsDataURL(file);
       });
+    }
+
+    async function fileToDisplayImage(file, dataUrl) {
+      if (window.createImageBitmap) {
+        try {
+          return await createImageBitmap(file, { imageOrientation: "none" });
+        } catch (_) {}
+      }
+      return dataUrlToImage(dataUrl);
     }
 
     function getBase64FromDataUrl(dataUrl) {
@@ -357,7 +373,40 @@ const HTML = `<!doctype html>
       return Array.isArray(data.translations) ? data.translations : [];
     }
 
-    function blurAndDrawLine(line, text) {
+    function wrapTextByWidth(text, maxWidth) {
+      const chars = Array.from(String(text || ""));
+      const lines = [];
+      let current = "";
+      for (const ch of chars) {
+        const test = current + ch;
+        if (!current || ctx.measureText(test).width <= maxWidth) {
+          current = test;
+        } else {
+          lines.push(current);
+          current = ch;
+        }
+      }
+      if (current) lines.push(current);
+      return lines.length ? lines : [""];
+    }
+
+    function buildTextLayout(text, boxWidth, boxHeight) {
+      const family = "\"Noto Sans SC\", sans-serif";
+      let fontSize = Math.max(10, Math.floor(boxHeight * 0.75));
+      while (fontSize >= 10) {
+        ctx.font = fontSize + "px " + family;
+        const lineHeight = Math.max(12, Math.floor(fontSize * 1.2));
+        const lines = wrapTextByWidth(text, boxWidth);
+        if (lines.length * lineHeight <= boxHeight + 2) {
+          return { fontSize, lineHeight, lines, family };
+        }
+        fontSize -= 1;
+      }
+      ctx.font = "10px " + family;
+      return { fontSize: 10, lineHeight: 12, lines: wrapTextByWidth(text, boxWidth), family };
+    }
+
+    function blurAndDrawLine(line, text, sourceCanvas) {
       const { left, top, width, height } = line.bbox;
       const x = Math.max(0, left);
       const y = Math.max(0, top);
@@ -366,7 +415,7 @@ const HTML = `<!doctype html>
 
       ctx.save();
       ctx.filter = "blur(12px)";
-      ctx.drawImage(canvas, x, y, w, h, x, y, w, h);
+      ctx.drawImage(sourceCanvas, x, y, w, h, x, y, w, h);
       ctx.restore();
 
       ctx.save();
@@ -374,27 +423,22 @@ const HTML = `<!doctype html>
       ctx.fillRect(x, y, w, h);
       ctx.fillStyle = "#0f172a";
       ctx.textBaseline = "top";
-      const fontSize = Math.max(12, Math.floor(h * 0.72));
-      ctx.font = fontSize + "px \\\"Noto Sans SC\\\", sans-serif";
-      drawWrappedText(text, x + 2, y + 1, Math.max(1, w - 4), fontSize + 2);
-      ctx.restore();
-    }
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.clip();
 
-    function drawWrappedText(text, x, y, maxWidth, lineHeight) {
-      const words = text.split(" ");
-      let line = "";
-      let cursorY = y;
-      for (const word of words) {
-        const test = line ? line + " " + word : word;
-        if (ctx.measureText(test).width <= maxWidth) {
-          line = test;
-        } else {
-          if (line) ctx.fillText(line, x, cursorY);
-          line = word;
-          cursorY += lineHeight;
-        }
+      const padX = Math.max(2, Math.floor(w * 0.04));
+      const padY = Math.max(1, Math.floor(h * 0.08));
+      const textWidth = Math.max(1, w - padX * 2);
+      const textHeight = Math.max(1, h - padY * 2);
+      const layout = buildTextLayout(text, textWidth, textHeight);
+      ctx.font = layout.fontSize + "px " + layout.family;
+      const totalHeight = layout.lines.length * layout.lineHeight;
+      const startY = y + padY + Math.max(0, Math.floor((textHeight - totalHeight) / 2));
+      for (let i = 0; i < layout.lines.length; i++) {
+        ctx.fillText(layout.lines[i], x + padX, startY + i * layout.lineHeight);
       }
-      if (line) ctx.fillText(line, x, cursorY);
+      ctx.restore();
     }
 
     function removeBackgroundBasic() {
@@ -428,9 +472,10 @@ const HTML = `<!doctype html>
       if (!file) return;
       try {
         currentDataUrl = await fileToDataUrl(file);
-        originalImage = await dataUrlToImage(currentDataUrl);
+        originalImage = await fileToDisplayImage(file, currentDataUrl);
         drawImage(originalImage);
-        setResult("图片已加载：" + file.name + "\\n尺寸：" + originalImage.naturalWidth + " x " + originalImage.naturalHeight);
+        const size = getImageSize(originalImage);
+        setResult("图片已加载：" + file.name + "\\n尺寸：" + size.width + " x " + size.height);
         setStatus("图片加载完成，可执行处理。");
       } catch (err) {
         setStatus("读取图片失败：" + err.message, true);
@@ -475,8 +520,12 @@ const HTML = `<!doctype html>
           if (translated.length !== lines.length) {
             throw new Error("翻译结果数量与 OCR 行数不一致");
           }
+          const sourceCanvas = document.createElement("canvas");
+          sourceCanvas.width = canvas.width;
+          sourceCanvas.height = canvas.height;
+          sourceCanvas.getContext("2d").drawImage(canvas, 0, 0);
           for (let i = 0; i < lines.length; i++) {
-            blurAndDrawLine(lines[i], translated[i]);
+            blurAndDrawLine(lines[i], translated[i], sourceCanvas);
           }
           setResult(lines.map((line, i) => line.text + " -> " + translated[i]).join("\\n") || "未识别到文本");
           setStatus("图片翻译完成（GLM-4.5-Flash），共处理 " + lines.length + " 行。");
